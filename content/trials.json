@@ -1,0 +1,128 @@
+[
+  {
+    "id": "sley.enter.return_text",
+    "title": "Return Text",
+    "campaign": "Enter The Loom",
+    "arc": "First Task",
+    "difficulty": 1,
+    "estimatedMinutes": 3,
+    "concepts": ["task", "main", "Text", "return"],
+    "mode": "code",
+    "instructions": "Change the return value of main. The compiler should run the task and return the exact text required by the seal.",
+    "task": "Make main return the text hello, Sley.",
+    "misconception": "Sley string values are Text values. Keep the quotes around text literals.",
+    "expectedBehavior": "Running the program returns a Text value.",
+    "starter": "task main -> Text {\n  return \"change me\"\n}\n",
+    "hints": [
+      "Look only at the text between quotes.",
+      "The return type already says Text, so the returned value must be a text literal.",
+      "The final line should return \"hello, Sley\"."
+    ],
+    "seal": {
+      "kind": "runtime",
+      "expected": {"kind": "Text", "value": "hello, Sley"}
+    },
+    "rewards": {"xp": 15, "shards": 2}
+  },
+  {
+    "id": "sley.tasks.first_take",
+    "title": "First Take",
+    "campaign": "Tasks And Takes",
+    "arc": "Explicit Inputs",
+    "difficulty": 1,
+    "estimatedMinutes": 5,
+    "concepts": ["task", "take", "call", "Text"],
+    "mode": "code",
+    "instructions": "A task uses take lines to declare explicit inputs. The call site already sends a name, so the task declaration must accept it.",
+    "task": "Repair greet so main returns hello Ada.",
+    "misconception": "A take belongs inside the task body, before the return that uses it.",
+    "expectedBehavior": "Running main calls greet with one Text input.",
+    "starter": "task greet -> Text {\n  return \"hello\"\n}\n\ntask main -> Text {\n  return call greet(\"Ada\")\n}\n",
+    "hints": [
+      "The diagnostic is about the number of arguments sent to greet.",
+      "Add a take named name with type Text inside greet.",
+      "Use the input in the return expression: \"hello \" + name."
+    ],
+    "seal": {
+      "kind": "runtime",
+      "expected": {"kind": "Text", "value": "hello Ada"}
+    },
+    "rewards": {"xp": 20, "shards": 2}
+  },
+  {
+    "id": "sley.bindings.mutable_total",
+    "title": "Mutable Total",
+    "campaign": "Binding Ontology",
+    "arc": "Bind, State, Tally",
+    "difficulty": 2,
+    "estimatedMinutes": 5,
+    "concepts": ["bind", "tally", "set", "Int"],
+    "mode": "code",
+    "instructions": "bind is immutable. Accumulators should use a mutable binding kind, usually tally for totals.",
+    "task": "Repair the binding so main returns 1.",
+    "misconception": "Do not make every value mutable. Use tally here because the name represents an accumulated total.",
+    "expectedBehavior": "The program updates total once and returns the updated Int.",
+    "starter": "task main -> Int {\n  bind total = 0\n  set total = total + 1\n  return total\n}\n",
+    "hints": [
+      "The problem is not the set line. The problem is the binding kind.",
+      "bind protects the value from mutation.",
+      "Replace bind total with tally total."
+    ],
+    "seal": {
+      "kind": "runtime",
+      "expected": {"kind": "Int", "value": 1}
+    },
+    "rewards": {"xp": 25, "shards": 3}
+  },
+  {
+    "id": "sley.collections.tally_list",
+    "title": "Tally A List",
+    "campaign": "Collections And Control Flow",
+    "arc": "Each Loops",
+    "difficulty": 2,
+    "estimatedMinutes": 6,
+    "concepts": ["List", "each", "tally", "call"],
+    "mode": "code",
+    "instructions": "each walks through a list. The sum task is already complete; main needs to call it with a list of numbers.",
+    "task": "Complete main so the program returns 10.",
+    "misconception": "The list literal must contain Int values because sum takes List<Int>.",
+    "expectedBehavior": "Running main calls sum with a list and returns the accumulated total.",
+    "starter": "task sum -> Int {\n  take values: List<Int>\n\n  tally total = 0\n  each value in values {\n    set total = total + value\n  }\n  return total\n}\n\ntask main -> Int {\n  return 0\n}\n",
+    "hints": [
+      "main should call sum.",
+      "Use a list literal such as [2, 3, 5].",
+      "The return can be return call sum([2, 3, 5])."
+    ],
+    "seal": {
+      "kind": "runtime",
+      "expected": {"kind": "Int", "value": 10}
+    },
+    "rewards": {"xp": 25, "shards": 3}
+  },
+  {
+    "id": "sley.diagnostics.explain_bind",
+    "title": "Explain A Diagnostic",
+    "campaign": "Binding Ontology",
+    "arc": "Diagnostics",
+    "difficulty": 2,
+    "estimatedMinutes": 4,
+    "concepts": ["diagnostics", "bind", "tally", "set"],
+    "mode": "explanation",
+    "instructions": "Some trials check whether you can explain the compiler's rule in plain language.",
+    "task": "Explain why set cannot modify bind total, and name the binding kind you would use for an accumulator.",
+    "misconception": "The answer is not that Sley forbids updates. Sley forbids updating immutable bindings.",
+    "expectedBehavior": "A passing answer mentions immutable bind and a mutable accumulator binding such as tally.",
+    "starter": "The compiler says set cannot modify bind total because ...",
+    "hints": [
+      "Mention that bind is immutable.",
+      "Mention that set needs a mutable binding.",
+      "Name tally as the accumulator-oriented binding kind."
+    ],
+    "seal": {
+      "kind": "keywords",
+      "required": [["bind"], ["immutable", "cannot modify", "not mutable"], ["tally", "state"]]
+    },
+    "rewards": {"xp": 15, "shards": 1}
+  }
+]
+
