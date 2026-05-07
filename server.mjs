@@ -12,7 +12,8 @@ const workDir = path.join(rootDir, "workspaces");
 const runsDir = path.join(workDir, "runs");
 const progressPath = process.env.LEARNSLEY_PROGRESS || path.join(workDir, "progress.json");
 const trialsPath = path.join(rootDir, "content", "trials.json");
-const sleyBin = process.env.SLEY_BIN || "<sley-repo>/target/debug/sley";
+const defaultSleyBin = path.join(rootDir, "..", "sley", "target", "debug", "sley");
+const sleyBin = process.env.SLEY_BIN || defaultSleyBin;
 const host = process.env.LEARNSLEY_HOST || "127.0.0.1";
 const port = Number.parseInt(process.env.PORT || "4179", 10);
 

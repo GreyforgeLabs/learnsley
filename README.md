@@ -1,7 +1,7 @@
 # LearnSley
 
 LearnSley is the local Linux-native MVP for the Sley learning game described in
-`<learnsley-spec>`.
+`LearnSley.md`.
 
 It is a web app UX backed by a localhost Node server. The server runs the real
 Sley compiler binary for `Run`, `Seal`, `Format`, `Graph`, and `Seal Digest`
@@ -11,7 +11,7 @@ default.
 ## Run
 
 ```bash
-cd <learnsley-local-repo>
+cd /path/to/learnsley
 npm start
 ```
 
@@ -24,7 +24,7 @@ http://127.0.0.1:4179
 Optional environment:
 
 ```bash
-SLEY_BIN=<sley-repo>/target/debug/sley PORT=4179 npm start
+SLEY_BIN=</path/to/sley/target/debug/sley> PORT=4179 npm start
 ```
 
 ## Current Slice
@@ -46,4 +46,3 @@ compiler-backed grader is intentionally local. A hosted version needs either:
 
 The local repo is the source of truth until one of those hosting paths is
 implemented and approved.
-
