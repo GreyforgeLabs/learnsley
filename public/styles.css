@@ -157,7 +157,7 @@ h3 {
 
 .trial-button:hover,
 .trial-button.active {
-  border-color: var(--amber);
+  border-color: var(--cyan);
   background: var(--panel-strong);
 }
 
