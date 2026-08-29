@@ -3,7 +3,8 @@ const state = {
   progress: null,
   currentTrialId: null,
   hintIndex: -1,
-  lastGraph: null
+  lastGraph: null,
+  csrfToken: null
 };
 
 const els = {
@@ -53,9 +54,16 @@ function saveCurrentCode() {
 }
 
 async function api(path, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  if (options.body !== undefined) {
+    headers["content-type"] = "application/json";
+  }
+  if (options.method && options.method !== "GET") {
+    headers["x-learnsley-csrf"] = state.csrfToken;
+  }
   const response = await fetch(path, {
-    headers: { "content-type": "application/json" },
-    ...options
+    ...options,
+    headers
   });
   const payload = await response.json();
   if (!response.ok) {
@@ -267,6 +275,8 @@ function resetCurrent() {
 }
 
 async function boot() {
+  const session = await api("/api/session");
+  state.csrfToken = session.csrfToken;
   const [trialsPayload, progressPayload] = await Promise.all([
     api("/api/trials"),
     api("/api/progress")
@@ -290,4 +300,3 @@ els.resetButton.addEventListener("click", resetCurrent);
 boot().catch((error) => {
   setDiagnostics(error.message, false);
 });
-

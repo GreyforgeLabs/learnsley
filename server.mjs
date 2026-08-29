@@ -1,25 +1,28 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { randomBytes, randomUUID } from "node:crypto";
+import { mkdtemp, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = __dirname;
 const publicDir = path.join(rootDir, "public");
-const workDir = path.join(rootDir, "workspaces");
-const runsDir = path.join(workDir, "runs");
-const progressPath = process.env.LEARNSLEY_PROGRESS || path.join(workDir, "progress.json");
+const defaultWorkDir = path.join(rootDir, "workspaces");
 const trialsPath = path.join(rootDir, "content", "trials.json");
 const defaultSleyBin = path.join(rootDir, "..", "sley", "target", "debug", "sley");
-const sleyBin = process.env.SLEY_BIN || defaultSleyBin;
-const host = process.env.LEARNSLEY_HOST || "127.0.0.1";
-const port = Number.parseInt(process.env.PORT || "4179", 10);
 
 const maxBodyBytes = 64 * 1024;
 const maxCodeBytes = 24 * 1024;
+const maxOutputBytes = 128 * 1024;
 const commandTimeoutMs = 5000;
+const staleWorkspaceMaxAgeMs = 6 * 60 * 60 * 1000;
+const staleWorkspaceMaxCount = 64;
+const staleWorkspaceMaxBytes = 32 * 1024 * 1024;
+
+const mutationRoutes = new Set(["/api/run", "/api/format", "/api/graph", "/api/seal"]);
+const loopbackNames = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 
 const mimeTypes = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -33,8 +36,6 @@ const mimeTypes = new Map([
   [".ico", "image/x-icon"]
 ]);
 
-await mkdir(runsDir, { recursive: true });
-
 function jsonResponse(res, status, payload) {
   const body = JSON.stringify(payload, null, 2);
   res.writeHead(status, {
@@ -45,8 +46,59 @@ function jsonResponse(res, status, payload) {
 }
 
 function textResponse(res, status, body, contentType = "text/plain; charset=utf-8") {
-  res.writeHead(status, {"content-type": contentType});
+  res.writeHead(status, { "content-type": contentType, "cache-control": "no-store" });
   res.end(body);
+}
+
+function httpError(statusCode, message) {
+  return Object.assign(new Error(message), { statusCode });
+}
+
+function parseHostHeader(value) {
+  if (!value) {
+    return null;
+  }
+  if (value.startsWith("[")) {
+    const end = value.indexOf("]");
+    return end === -1 ? null : value.slice(1, end);
+  }
+  return value.split(":")[0];
+}
+
+function isLoopbackHostName(value) {
+  return loopbackNames.has(String(value || "").toLowerCase());
+}
+
+function requestOrigin(req) {
+  const protocol = req.socket.encrypted ? "https" : "http";
+  return `${protocol}://${req.headers.host}`;
+}
+
+function validateHost(req) {
+  const hostName = parseHostHeader(req.headers.host);
+  if (!isLoopbackHostName(hostName)) {
+    throw httpError(403, "host must be loopback");
+  }
+}
+
+function validateMutationRequest(req, pathname, csrfToken) {
+  if (!mutationRoutes.has(pathname)) {
+    return;
+  }
+
+  const contentType = String(req.headers["content-type"] || "").toLowerCase();
+  if (!contentType.split(";")[0].trim().match(/^application\/json$/)) {
+    throw httpError(415, "mutations require application/json");
+  }
+
+  const origin = req.headers.origin;
+  if (!origin || origin === "null" || origin !== requestOrigin(req)) {
+    throw httpError(403, "mutations require same-origin requests");
+  }
+
+  if (req.headers["x-learnsley-csrf"] !== csrfToken) {
+    throw httpError(403, "invalid csrf token");
+  }
 }
 
 async function readJson(file, fallback) {
@@ -86,7 +138,7 @@ function baseProgress() {
   };
 }
 
-async function loadProgress() {
+async function loadProgress(progressPath) {
   try {
     const progress = await readJson(progressPath, baseProgress());
     return { ...baseProgress(), ...progress };
@@ -103,7 +155,7 @@ async function loadProgress() {
   }
 }
 
-async function saveProgress(progress) {
+async function saveProgress(progressPath, progress) {
   progress.updatedAt = new Date().toISOString();
   const tmp = path.join(
     path.dirname(progressPath),
@@ -145,14 +197,18 @@ async function parseBody(req) {
   for await (const chunk of req) {
     size += chunk.length;
     if (size > maxBodyBytes) {
-      throw Object.assign(new Error("request body is too large"), { statusCode: 413 });
+      throw httpError(413, "request body is too large");
     }
     chunks.push(chunk);
   }
   if (chunks.length === 0) {
     return {};
   }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    throw httpError(400, "request body must be valid json");
+  }
 }
 
 function findTrial(trials, trialId) {
@@ -161,61 +217,163 @@ function findTrial(trials, trialId) {
 
 function validateSubmission(trial, code) {
   if (!trial) {
-    throw Object.assign(new Error("unknown trial"), { statusCode: 404 });
+    throw httpError(404, "unknown trial");
   }
   if (typeof code !== "string") {
-    throw Object.assign(new Error("code must be a string"), { statusCode: 400 });
+    throw httpError(400, "code must be a string");
   }
   if (Buffer.byteLength(code, "utf8") > maxCodeBytes) {
-    throw Object.assign(new Error("submission is too large"), { statusCode: 413 });
+    throw httpError(413, "submission is too large");
   }
 }
 
-async function writeRunFile(code) {
-  const runId = randomUUID();
-  const runDir = path.join(runsDir, runId);
-  await mkdir(runDir, { recursive: true });
-  const sourcePath = path.join(runDir, "main.sley");
-  await writeFile(sourcePath, code, "utf8");
-  return { runId, runDir, sourcePath };
+function redactedCleanupError(error) {
+  return {
+    name: error?.name || "Error",
+    code: error?.code || "UNKNOWN",
+    message: String(error?.message || "cleanup failed").replaceAll(rootDir, "<repo>")
+  };
 }
 
-function runSley(args) {
+async function directorySize(dir) {
+  let total = 0;
+  const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      total += await directorySize(fullPath);
+    } else if (entry.isFile()) {
+      total += (await stat(fullPath)).size;
+    }
+  }
+  return total;
+}
+
+async function pruneStaleWorkspaces(tmpDir, logger = console) {
+  await mkdir(tmpDir, { recursive: true });
+  const now = Date.now();
+  const entries = [];
+  for (const entry of await readdir(tmpDir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith("run-")) {
+      continue;
+    }
+    const fullPath = path.join(tmpDir, entry.name);
+    const info = await stat(fullPath).catch(() => null);
+    if (!info) {
+      continue;
+    }
+    entries.push({ fullPath, mtimeMs: info.mtimeMs, size: await directorySize(fullPath) });
+  }
+
+  entries.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  let retainedCount = entries.length;
+  let retainedBytes = entries.reduce((sum, entry) => sum + entry.size, 0);
+  for (const entry of entries) {
+    const expired = now - entry.mtimeMs > staleWorkspaceMaxAgeMs;
+    const overCount = retainedCount > staleWorkspaceMaxCount;
+    const overBytes = retainedBytes > staleWorkspaceMaxBytes;
+    if (!expired && !overCount && !overBytes) {
+      continue;
+    }
+    try {
+      await rm(entry.fullPath, { recursive: true, force: true });
+      retainedCount -= 1;
+      retainedBytes -= entry.size;
+    } catch (error) {
+      logger.warn("learnsley workspace cleanup failed", redactedCleanupError(error));
+    }
+  }
+}
+
+async function withRunWorkspace(tmpDir, code, callback, logger) {
+  await pruneStaleWorkspaces(tmpDir, logger);
+  const runDir = await mkdtemp(path.join(tmpDir, "run-"));
+  const sourcePath = path.join(runDir, "main.sley");
+  try {
+    await writeFile(sourcePath, code, "utf8");
+    return await callback(sourcePath);
+  } finally {
+    await rm(runDir, { recursive: true, force: true }).catch((error) => {
+      logger.warn("learnsley workspace cleanup failed", redactedCleanupError(error));
+    });
+  }
+}
+
+function terminateProcessGroup(child, signal = "SIGKILL") {
+  if (!child.pid) {
+    return;
+  }
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    child.kill(signal);
+  }
+}
+
+function runSley(sleyBin, args, options = {}) {
+  const { cwd = rootDir, timeoutMs = commandTimeoutMs, signal, env = process.env } = options;
   return new Promise((resolve) => {
     const child = spawn(sleyBin, args, {
-      cwd: rootDir,
+      cwd,
+      detached: process.platform !== "win32",
       shell: false,
-      env: { ...process.env, NO_COLOR: "1" },
+      env: { ...env, NO_COLOR: "1" },
       stdio: ["ignore", "pipe", "pipe"]
     });
 
     let stdout = "";
     let stderr = "";
     let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGKILL");
-    }, commandTimeoutMs);
+    let cancelled = false;
+    let outputFlooded = false;
+    let settled = false;
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const stop = (reason) => {
+      if (reason === "timeout") {
+        timedOut = true;
+      }
+      if (reason === "cancelled") {
+        cancelled = true;
+      }
+      if (reason === "outputFlood") {
+        outputFlooded = true;
+      }
+      terminateProcessGroup(child);
+    };
+    const timer = setTimeout(() => stop("timeout"), timeoutMs);
+    const onAbort = () => stop("cancelled");
+    if (signal?.aborted) {
+      onAbort();
+    } else {
+      signal?.addEventListener("abort", onAbort, { once: true });
+    }
 
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString("utf8");
-      if (stdout.length > 128 * 1024) {
-        child.kill("SIGKILL");
+      if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > maxOutputBytes) {
+        stop("outputFlood");
       }
     });
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString("utf8");
-      if (stderr.length > 128 * 1024) {
-        child.kill("SIGKILL");
+      if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > maxOutputBytes) {
+        stop("outputFlood");
       }
     });
     child.on("error", (error) => {
-      clearTimeout(timer);
-      resolve({ ok: false, code: 127, stdout, stderr: `${stderr}${error.message}`, timedOut });
+      signal?.removeEventListener("abort", onAbort);
+      finish({ ok: false, code: 127, stdout, stderr: `${stderr}${error.message}`, timedOut, cancelled, outputFlooded });
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ ok: code === 0 && !timedOut, code, stdout, stderr, timedOut });
+      signal?.removeEventListener("abort", onAbort);
+      finish({ ok: code === 0 && !timedOut && !cancelled && !outputFlooded, code, stdout, stderr, timedOut, cancelled, outputFlooded });
     });
   });
 }
@@ -228,39 +386,32 @@ function parseJsonOutput(commandResult) {
   }
 }
 
-async function compileAndRun(code) {
-  const { sourcePath } = await writeRunFile(code);
-  const check = await runSley(["check", "--json", sourcePath]);
-  const checkJson = parseJsonOutput(check);
-  if (!check.ok) {
+async function compileAndRun(appState, code) {
+  return withRunWorkspace(appState.tmpDir, code, async (sourcePath) => {
+    const check = await runSley(appState.sleyBin, ["check", "--json", sourcePath], appState);
+    const checkJson = parseJsonOutput(check);
+    if (!check.ok) {
+      return { ok: false, phase: "check", check, checkJson, output: null, graphJson: null, sealJson: null };
+    }
+
+    const run = await runSley(appState.sleyBin, ["run", "--json", sourcePath], appState);
+    const output = parseJsonOutput(run);
+    const graph = await runSley(appState.sleyBin, ["graph", "--json", sourcePath], appState);
+    const seal = await runSley(appState.sleyBin, ["seal", "--json", sourcePath], appState);
+
     return {
-      ok: false,
-      phase: "check",
+      ok: run.ok,
+      phase: "run",
       check,
       checkJson,
-      output: null,
-      graphJson: null,
-      sealJson: null
+      run,
+      output,
+      graphJson: parseJsonOutput(graph),
+      graphRaw: graph.stdout || graph.stderr,
+      sealJson: parseJsonOutput(seal),
+      sealRaw: seal.stdout || seal.stderr
     };
-  }
-
-  const run = await runSley(["run", "--json", sourcePath]);
-  const output = parseJsonOutput(run);
-  const graph = await runSley(["graph", "--json", sourcePath]);
-  const seal = await runSley(["seal", "--json", sourcePath]);
-
-  return {
-    ok: run.ok,
-    phase: run.ok ? "run" : "run",
-    check,
-    checkJson,
-    run,
-    output,
-    graphJson: parseJsonOutput(graph),
-    graphRaw: graph.stdout || graph.stderr,
-    sealJson: parseJsonOutput(seal),
-    sealRaw: seal.stdout || seal.stderr
-  };
+  }, appState.logger);
 }
 
 function valuesEqual(actual, expected) {
@@ -276,13 +427,10 @@ function keywordSeal(code, seal) {
       missing.push(group);
     }
   }
-  return {
-    ok: missing.length === 0,
-    missing
-  };
+  return { ok: missing.length === 0, missing };
 }
 
-async function runTrial(trial, code) {
+async function runTrial(appState, trial, code) {
   if (trial.mode === "explanation") {
     return {
       ok: true,
@@ -294,38 +442,30 @@ async function runTrial(trial, code) {
       sealJson: null
     };
   }
-  return compileAndRun(code);
+  return compileAndRun(appState, code);
 }
 
-async function sealTrial(trial, code) {
+async function sealTrial(appState, trial, code) {
   if (trial.seal.kind === "keywords") {
     const result = keywordSeal(code, trial.seal);
     return {
       passed: result.ok,
       reason: result.ok ? "Answer accepted." : "Answer is missing required concepts.",
       detail: result,
-      run: await runTrial(trial, code)
+      run: await runTrial(appState, trial, code)
     };
   }
 
-  const run = await compileAndRun(code);
+  const run = await compileAndRun(appState, code);
   if (!run.ok) {
-    return {
-      passed: false,
-      reason: `Program failed during ${run.phase}.`,
-      detail: null,
-      run
-    };
+    return { passed: false, reason: `Program failed during ${run.phase}.`, detail: null, run };
   }
 
   const passed = valuesEqual(run.output, trial.seal.expected);
   return {
     passed,
     reason: passed ? "Seal accepted." : "Runtime output did not match the seal.",
-    detail: {
-      expected: trial.seal.expected,
-      actual: run.output
-    },
+    detail: { expected: trial.seal.expected, actual: run.output },
     run
   };
 }
@@ -371,14 +511,14 @@ function applySealProgress(progress, trial, passed) {
   return awards;
 }
 
-async function recordRun(trialId) {
-  const progress = await loadProgress();
+async function recordRun(appState, trialId) {
+  const progress = await loadProgress(appState.progressPath);
   const attempt = progress.attempts[trialId] || { runs: 0, seals: 0, failedSeals: 0 };
   attempt.runs += 1;
   attempt.lastRunAt = new Date().toISOString();
   progress.attempts[trialId] = attempt;
   updateDailyPulse(progress);
-  await saveProgress(progress);
+  await saveProgress(appState.progressPath, progress);
   return progress;
 }
 
@@ -412,11 +552,16 @@ async function serveStatic(req, res, pathname) {
   }
 }
 
-async function handleApi(req, res, pathname) {
+async function handleApi(appState, req, res, pathname) {
   const trials = await loadTrials();
 
   if (req.method === "GET" && pathname === "/api/health") {
-    jsonResponse(res, 200, { ok: true, sleyBin, host, port });
+    jsonResponse(res, 200, { ok: true, host: appState.host, port: appState.port, compilerConfigured: Boolean(appState.sleyBin) });
+    return;
+  }
+
+  if (req.method === "GET" && pathname === "/api/session") {
+    jsonResponse(res, 200, { ok: true, csrfToken: appState.csrfToken });
     return;
   }
 
@@ -426,7 +571,7 @@ async function handleApi(req, res, pathname) {
   }
 
   if (req.method === "GET" && pathname === "/api/progress") {
-    jsonResponse(res, 200, { progress: await loadProgress() });
+    jsonResponse(res, 200, { progress: await loadProgress(appState.progressPath) });
     return;
   }
 
@@ -434,8 +579,8 @@ async function handleApi(req, res, pathname) {
     const body = await parseBody(req);
     const trial = findTrial(trials, body.trialId);
     validateSubmission(trial, body.code);
-    const run = await runTrial(trial, body.code);
-    const progress = await recordRun(trial.id);
+    const run = await runTrial(appState, trial, body.code);
+    const progress = await recordRun(appState, trial.id);
     jsonResponse(res, 200, { ok: run.ok, run, progress });
     return;
   }
@@ -448,9 +593,11 @@ async function handleApi(req, res, pathname) {
       jsonResponse(res, 400, { ok: false, error: "format is only available for code trials" });
       return;
     }
-    const { sourcePath } = await writeRunFile(body.code);
-    const formatted = await runSley(["format", sourcePath]);
-    jsonResponse(res, 200, { ok: formatted.ok, formatted: formatted.stdout, stderr: formatted.stderr });
+    const result = await withRunWorkspace(appState.tmpDir, body.code, async (sourcePath) => {
+      const formatted = await runSley(appState.sleyBin, ["format", sourcePath], appState);
+      return { ok: formatted.ok, formatted: formatted.stdout, stderr: formatted.stderr };
+    }, appState.logger);
+    jsonResponse(res, 200, result);
     return;
   }
 
@@ -462,9 +609,11 @@ async function handleApi(req, res, pathname) {
       jsonResponse(res, 400, { ok: false, error: "graph is only available for code trials" });
       return;
     }
-    const { sourcePath } = await writeRunFile(body.code);
-    const graph = await runSley(["graph", "--json", sourcePath]);
-    jsonResponse(res, 200, { ok: graph.ok, graph: parseJsonOutput(graph), stdout: graph.stdout, stderr: graph.stderr });
+    const result = await withRunWorkspace(appState.tmpDir, body.code, async (sourcePath) => {
+      const graph = await runSley(appState.sleyBin, ["graph", "--json", sourcePath], appState);
+      return { ok: graph.ok, graph: parseJsonOutput(graph), stdout: graph.stdout, stderr: graph.stderr };
+    }, appState.logger);
+    jsonResponse(res, 200, result);
     return;
   }
 
@@ -472,10 +621,10 @@ async function handleApi(req, res, pathname) {
     const body = await parseBody(req);
     const trial = findTrial(trials, body.trialId);
     validateSubmission(trial, body.code);
-    const seal = await sealTrial(trial, body.code);
-    const progress = await loadProgress();
+    const seal = await sealTrial(appState, trial, body.code);
+    const progress = await loadProgress(appState.progressPath);
     const awards = applySealProgress(progress, trial, seal.passed);
-    await saveProgress(progress);
+    await saveProgress(appState.progressPath, progress);
     jsonResponse(res, 200, { ok: seal.passed, seal, progress, awards });
     return;
   }
@@ -483,21 +632,72 @@ async function handleApi(req, res, pathname) {
   jsonResponse(res, 404, { ok: false, error: "unknown api route" });
 }
 
-const server = createServer(async (req, res) => {
-  try {
-    const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
-    if (url.pathname.startsWith("/api/")) {
-      await handleApi(req, res, url.pathname);
-      return;
-    }
-    await serveStatic(req, res, url.pathname);
-  } catch (error) {
-    const status = error.statusCode || 500;
-    jsonResponse(res, status, { ok: false, error: error.message || "internal error" });
-  }
-});
+export function createLearnSleyServer(options = {}) {
+  const workDir = options.workDir || process.env.LEARNSLEY_WORKDIR || defaultWorkDir;
+  const appState = {
+    host: options.host || process.env.LEARNSLEY_HOST || "127.0.0.1",
+    port: Number.parseInt(String(options.port || process.env.PORT || "4179"), 10),
+    sleyBin: options.sleyBin || process.env.SLEY_BIN || defaultSleyBin,
+    progressPath: options.progressPath || process.env.LEARNSLEY_PROGRESS || path.join(workDir, "progress.json"),
+    tmpDir: options.tmpDir || path.join(workDir, "tmp"),
+    csrfToken: options.csrfToken || randomBytes(32).toString("base64url"),
+    timeoutMs: options.timeoutMs || commandTimeoutMs,
+    cwd: options.cwd || rootDir,
+    logger: options.logger || console
+  };
 
-server.listen(port, host, () => {
-  console.log(`LearnSley local server: http://${host}:${port}`);
-  console.log(`Sley binary: ${sleyBin}`);
-});
+  if (!isLoopbackHostName(appState.host)) {
+    throw new Error("LEARNSLEY_HOST must be a loopback address for the compiler-backed service");
+  }
+
+  const server = createServer(async (req, res) => {
+    try {
+      validateHost(req);
+      const url = new URL(req.url || "/", requestOrigin(req));
+      validateMutationRequest(req, url.pathname, appState.csrfToken);
+      const requestState = { ...appState };
+      if (mutationRoutes.has(url.pathname)) {
+        const controller = new AbortController();
+        req.on("aborted", () => controller.abort());
+        requestState.signal = controller.signal;
+      }
+      if (url.pathname.startsWith("/api/")) {
+        await handleApi(requestState, req, res, url.pathname);
+        return;
+      }
+      await serveStatic(req, res, url.pathname);
+    } catch (error) {
+      const status = error.statusCode || 500;
+      jsonResponse(res, status, { ok: false, error: error.message || "internal error" });
+    }
+  });
+
+  return { server, appState };
+}
+
+export async function startLearnSley(options = {}) {
+  const instance = createLearnSleyServer(options);
+  await mkdir(path.dirname(instance.appState.progressPath), { recursive: true });
+  await mkdir(instance.appState.tmpDir, { recursive: true });
+  await pruneStaleWorkspaces(instance.appState.tmpDir, instance.appState.logger);
+  await new Promise((resolve) => instance.server.listen(instance.appState.port, instance.appState.host, resolve));
+  return instance;
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  startLearnSley().then(({ appState }) => {
+    console.log(`LearnSley local server: http://${appState.host}:${appState.port}`);
+    console.log("Sley binary: <configured>");
+  }).catch((error) => {
+    console.error(error.message);
+    process.exitCode = 1;
+  });
+}
+
+export const testInternals = {
+  isLoopbackHostName,
+  pruneStaleWorkspaces,
+  runSley,
+  staleWorkspaceMaxCount,
+  withRunWorkspace
+};

@@ -61,16 +61,16 @@ Sley compiler. This is the honest Boot.dev-like shape for Sley v0:
 3. content stored as versioned manifests and `.sley` examples;
 4. no public arbitrary-code execution until the sandbox model is explicit.
 
-The public target can still be `learnsley.greyforge.tech`, but public hosting
+The public target can still be `<learnsley-public-site>`, but public hosting
 should initially mean a marketing/demo shell or a browser-only preview unless a
 server sandbox exists. A hosted grader that executes user Sley code is a real
 runtime surface, not a static page.
 
 Current deployment posture on 2026-05-05:
 
-1. `learnsley.greyforge.tech` resolves through the existing domain DNS posture,
+1. `<learnsley-public-site>` resolves through the existing domain DNS posture,
    but no LearnSley app route is implemented yet;
-2. the existing Greyforge web surface is a Next.js WebForge repo under
+2. the existing web surface is a separate site repo under
    `<web-surface-repo>`;
 3. the safest first build target is `<learnsley-local-repo>`, a standalone
    local repo that can later export a static demo or be integrated into
@@ -80,7 +80,7 @@ Current deployment posture on 2026-05-05:
 The implementation rule is:
 
 ```text
-local first -> compiler-backed MVP -> sandbox design -> WebForge/static demo -> learnsley.greyforge.tech
+local first -> compiler-backed MVP -> sandbox design -> static demo -> <learnsley-public-site>
 ```
 
 ## Spec Audit
