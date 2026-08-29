@@ -144,6 +144,15 @@ test("mutations require loopback host, same-origin Origin, CSRF, and application
       body: validBody
     })).status, 403);
 
+    for (const malformedHost of ["[::1]evil", "localhost@evil.example", "localhost:99999"]) {
+      assert.equal((await rawRequest(port, {
+        hostHeader: malformedHost,
+        origin: `http://${malformedHost}`,
+        csrf: harness.appState.csrfToken,
+        body: validBody
+      })).status, 403);
+    }
+
     assert.equal((await rawRequest(port, {
       hostHeader: `127.0.0.1:${port}`,
       origin: "null",

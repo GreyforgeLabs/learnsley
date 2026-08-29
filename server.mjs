@@ -2,7 +2,6 @@ import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import os from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -22,7 +21,7 @@ const staleWorkspaceMaxCount = 64;
 const staleWorkspaceMaxBytes = 32 * 1024 * 1024;
 
 const mutationRoutes = new Set(["/api/run", "/api/format", "/api/graph", "/api/seal"]);
-const loopbackNames = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+const loopbackNames = new Set(["localhost", "127.0.0.1", "::1"]);
 
 const mimeTypes = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -55,14 +54,18 @@ function httpError(statusCode, message) {
 }
 
 function parseHostHeader(value) {
-  if (!value) {
+  const normalized = String(value || "").toLowerCase();
+  const ipv6 = normalized.match(/^\[(::1)\](?::([0-9]{1,5}))?$/);
+  const named = normalized.match(/^(localhost|127\.0\.0\.1)(?::([0-9]{1,5}))?$/);
+  const match = ipv6 || named;
+  if (!match) {
     return null;
   }
-  if (value.startsWith("[")) {
-    const end = value.indexOf("]");
-    return end === -1 ? null : value.slice(1, end);
+  const port = match[2];
+  if (port && (Number(port) < 1 || Number(port) > 65535)) {
+    return null;
   }
-  return value.split(":")[0];
+  return match[1];
 }
 
 function isLoopbackHostName(value) {
