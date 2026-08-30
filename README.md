@@ -1,3 +1,15 @@
+# Migrated to Sley Legacy
+
+> [!IMPORTANT]
+> This Sley 1.x learning repository is preserved as a historical tombstone.
+> Development moved to [`learning/learnsley/` in Sley Legacy](https://github.com/GreyforgeLabs/sley-legacy/tree/public/learning/learnsley).
+> Existing history and links remain here. Active Sley development is the
+> intentionally incompatible machine-native 2.x lineage at
+> [`GreyforgeLabs/sley`](https://github.com/GreyforgeLabs/sley). LearnSley teaches
+> Sley 1.x and is not a Sley 2 learning surface.
+
+---
+
 # LearnSley
 
 LearnSley is the local Linux-native MVP for the Sley learning game described in
